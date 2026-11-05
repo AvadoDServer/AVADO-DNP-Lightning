@@ -1,0 +1,33 @@
+{
+  "name": "lightning.avado.dnp.dappnode.eth",
+  "version": "0.1.0",
+  "upstream": "v0.21.6-beta",
+  "title": "Lightning",
+  "description": "Your own Lightning node (LND) for quick, cheap Bitcoin payments with the Zeus app on your phone. It runs on your Bitcoin Node, which must keep the full Bitcoin history (not the space-saving mode). Its page makes your wallet in a few clicks: write down the 24 words, download the channel backup, scan a QR code with Zeus. With the Tailscale app it also works away from home. This is a hot wallet, always online: keep only small amounts here.",
+  "shortDescription": "Quick Bitcoin payments from your phone, on your own node",
+  "type": "service",
+  "avadocategory": "bitcoin",
+  "autoupdate": true,
+  "image": {
+    "volumes": [
+      "lightning:/data"
+    ],
+    "ports": [
+      "9735:9735",
+      "8080:8080"
+    ],
+    "environment": [
+      "ALIAS=AVADO"
+    ],
+    "restart": "always"
+  },
+  "author": "AVADO",
+  "license": "GPL-3.0",
+  "dependencies": {
+    "bitcoincore.avado.dnp.dappnode.eth": "0.1.0"
+  },
+  "links": {
+    "OnboardingWizard": "http://lightning.my.ava.do",
+    "HomePage": "https://github.com/lightningnetwork/lnd"
+  }
+}
