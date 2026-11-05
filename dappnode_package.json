@@ -29,5 +29,6 @@
   "links": {
     "OnboardingWizard": "http://lightning.my.ava.do",
     "HomePage": "https://github.com/lightningnetwork/lnd"
-  }
+  },
+  "avatar": "/ipfs/QmWtKkBzuvGtHS5XJzr2RL228PG5JDoFiuYN5PKCpwNtds"
 }
