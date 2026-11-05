@@ -92,3 +92,7 @@ form.form label { display: grid; gap: 4px; font-size: 13.5px; color: rgb(var(--f
 form.form textarea, form.form input { font: inherit; color: rgb(var(--fg)); background: rgb(var(--bg-inset)); border: 1px solid rgb(var(--border)); border-radius: var(--radius-control); padding: 8px 10px; width: 100%; }
 form.form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
 @media (max-width: 520px) { .card { padding: 16px; } .hero h1 { font-size: 19px; } .field .k { min-width: 0; width: 100%; } }
+.confirm { margin-top: 12px; padding: 14px 16px; border-radius: var(--radius-control); border: 1px solid rgb(var(--warning) / 0.6); background: rgb(var(--warning-subtle)); }
+.confirm p { margin: 0; font-weight: 600; }
+.confirm .btns { margin-top: 12px; }
+[hidden] { display: none !important; }
