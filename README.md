@@ -31,6 +31,19 @@ Behind **More options**: restore a wallet from 24 words (and a channel backup fi
 code (home Wi-Fi only, or `lightning.my.ava.do` for Tailscale, AVADO Remote Access and the AVADO
 Wi-Fi), "Disconnect all phones", how the wallet opens by itself, and the technical details.
 
+## Page PIN
+
+The 24 words, the phone QR code ("Show the QR code", "Connect another phone"), "Disconnect all
+phones", creating or restoring the wallet and the channel-backup download ask for a page PIN
+(6 to 12 digits), chosen the first time one of them is pressed. Same rules as AVADO AI Connect
+(`build/app/pin.py`): scrypt in `/data/avado/pin.json`; an HttpOnly, SameSite=Strict session cookie
+for 30 minutes at most, 10 minutes without use; per device 5 tries, then waits that double from
+1 minute to 15 minutes; for the whole box, after more than 20 wrong PINs in an hour every try waits
+3 seconds. Forgot it: Restart Lightning in the AVADO Admin (a new container of the same version)
+removes the PIN; the wallet, words and phones stay. A reboot, power cut or update does not.
+Note: everyone coming in through AVADO Remote Access shares one address, so for the device count
+they are one device.
+
 ## How it works
 
 - **Bitcoin Node login.** The app fetches its own RPC login from the Bitcoin Node

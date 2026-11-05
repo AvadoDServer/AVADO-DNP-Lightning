@@ -1,7 +1,9 @@
 // Draws the page model from /api/status. Shared by the AVADO Bitcoin packages
 // (Bitcoin node, Electrum server, Bitcoin explorer, Lightning). This copy
-// (Lightning) adds checklists, forms, download links and "reveal" cards (secrets
-// shown only after a button press: the 24 words, the phone QR code) and is
+// (Lightning) adds checklists, forms, download links, "reveal" cards (secrets
+// shown only after a button press: the 24 words, the phone QR code) and the
+// page PIN (asked when the server answers 401 with "pin", then the action is
+// repeated), and is
 // otherwise identical, so it can replace the others when they next change.
 // Everything is inserted as text (never as HTML), so nothing the server or a
 // peer sends can run as code on this page. URLs are relative, so the page also
@@ -86,10 +88,14 @@
     })
       .then(function (resp) {
         return resp.json().then(function (data) {
-          return { ok: resp.ok, data: data };
+          return { ok: resp.ok, status: resp.status, data: data };
         });
       })
       .then(function (r) {
+        if (r.status === 401 && r.data.pin) {
+          askPin(r.data.pin, { action: spec }, r.data.error);
+          return;
+        }
         if (r.ok && r.data.reveal) {
           reveal = r.data.reveal;
           revealScroll = true;
@@ -119,8 +125,9 @@
       a.href = l.href;
       if (l.download) {
         a.setAttribute("download", "");
-        a.addEventListener("click", function () {
-          setTimeout(load, 1500); // the step ticks once the file was fetched
+        a.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          download(l.href);
         });
       }
       if (/^https?:/.test(l.href) && l.external) {
@@ -248,6 +255,126 @@
     return card;
   }
 
+  // Fetches a file (the PIN may be asked first) and hands it to the browser to save.
+  function download(href) {
+    fetch(href, { cache: "no-store" })
+      .then(function (resp) {
+        if (resp.ok) {
+          var name = /filename="([^"]+)"/.exec(resp.headers.get("Content-Disposition") || "");
+          return resp.blob().then(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var a = el("a");
+            a.href = url;
+            a.download = name ? name[1] : "download";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function () {
+              URL.revokeObjectURL(url);
+            }, 10000);
+            setTimeout(load, 1500); // the step ticks once the file was fetched
+          });
+        }
+        return resp.text().then(function (text) {
+          var data = {};
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            data = { error: text };
+          }
+          if (resp.status === 401 && data.pin) askPin(data.pin, { download: href }, data.error);
+          else toast(data.error || "That did not work. Please try again.");
+        });
+      })
+      .catch(function () {
+        toast("The app did not answer. Please try again in a minute.");
+      });
+  }
+
+  // The page PIN: choose one ("set") or enter it ("enter"), then repeat what was asked.
+  function askPin(need, retry, message) {
+    reveal = { pin: need, retry: retry, message: message };
+    revealScroll = true;
+    if (lastModel) render(lastModel);
+  }
+
+  function renderPin(r) {
+    var card = el("section", "card reveal");
+    card.id = "pin";
+    var set = r.pin === "set";
+    card.appendChild(el("h2", null, set ? "Choose a PIN for this page" : "Enter your PIN"));
+    paragraphs(card, set
+      ? "It protects your 24 words, the phone code and the backup. Forgot it? Restart Lightning in the AVADO Admin."
+      : r.message && r.message !== "Enter your PIN." ? r.message : "The PIN you chose for this page.", "muted");
+    var form = el("form", "form");
+    function field(label) {
+      var l = el("label", null, label);
+      var i = el("input");
+      i.type = "password";
+      i.setAttribute("inputmode", "numeric");
+      i.setAttribute("autocomplete", "off");
+      i.setAttribute("maxlength", "12");
+      l.appendChild(i);
+      form.appendChild(l);
+      return i;
+    }
+    var first = field(set ? "PIN (6 to 12 digits)" : "PIN");
+    var again = set ? field("The same PIN again") : null;
+    var btns = el("div", "btns");
+    var ok = el("button", "primary", set ? "Save PIN" : "Unlock");
+    ok.type = "submit";
+    var cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", function () {
+      reveal = null;
+      if (lastModel) render(lastModel);
+    });
+    btns.appendChild(ok);
+    btns.appendChild(cancel);
+    form.appendChild(btns);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      ok.disabled = true;
+      var body = set ? { pin: first.value, again: again.value } : { pin: first.value };
+      fetch("api/action/" + (set ? "pin-set" : "pin-enter"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Avado": "1" },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      })
+        .then(function (resp) {
+          return resp.json().then(function (data) {
+            return { ok: resp.ok, data: data };
+          });
+        })
+        .then(function (res) {
+          ok.disabled = false;
+          if (!res.ok) {
+            form.reset();
+            toast(res.data.error || "That did not work. Please try again.");
+            return;
+          }
+          var retry = r.retry || {};
+          reveal = null;
+          if (lastModel) render(lastModel);
+          if (retry.download) download(retry.download);
+          else if (retry.action) runAction(el("button"), Object.assign({}, retry.action, { confirm: null }));
+        })
+        .catch(function () {
+          ok.disabled = false;
+          toast("The app did not answer. Please try again in a minute.");
+        });
+    });
+    card.appendChild(form);
+    if (!r.focused) {
+      r.focused = true; // once, not at every refresh
+      setTimeout(function () {
+        first.focus();
+      }, 50);
+    }
+    return card;
+  }
+
   // Numbered set-up steps with a live tick.
   function renderChecklist(items) {
     var ol = el("ol", "checklist");
@@ -333,6 +460,7 @@
 
   // A card with something shown only on request: the 24 words or the phone QR code.
   function renderReveal(r) {
+    if (r.pin) return renderPin(r);
     var card = el("section", "card reveal");
     if (r.id) card.id = r.id;
     card.appendChild(el("h2", null, r.title || ""));

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import avadoweb  # noqa: E402
 import gate  # noqa: E402
 import main  # noqa: E402
+import pin as pinlock  # noqa: E402
 
 LOGIN = ("lnd", "pw-secret-123", 8332)
 ZMQ = {"pubrawblock": 28332, "pubrawtx": 28333}
@@ -264,6 +265,175 @@ class BackupStateTest(unittest.TestCase):
         self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": []}, ["a:0"]), "changed")
         self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": ["a:0"]}, []), "changed")
         self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": ["a:0"]}, None), "ok")
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1_000_000.0
+        self.slept = 0
+
+    def now(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.slept += seconds
+
+
+class PinTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "pin.json")
+        self.clock = Clock()
+        self.pin = pinlock.Pin(self.path, now=self.clock.now, sleep=self.clock.sleep)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def cookie(self, token):
+        return "other=1; %s=%s" % (pinlock.COOKIE, token)
+
+    def test_choose_then_require(self):
+        with self.assertRaises(pinlock.PinError) as err:
+            self.pin.require(None)
+        self.assertEqual((err.exception.status, err.exception.need), (401, "set"))
+        for bad in (("12345", "12345"), ("1234567", "7654321"), ("abcdef", "abcdef")):
+            with self.assertRaises(pinlock.PinError):
+                self.pin.choose(*bad)
+        token = self.pin.choose("246810", "246810")
+        self.pin.require(self.cookie(token))
+        with self.assertRaises(pinlock.PinError) as err:
+            self.pin.require("ln_session=forged")
+        self.assertEqual(err.exception.need, "enter")
+        with open(self.path) as handle:
+            saved = json.load(handle)
+        self.assertNotIn("246810", json.dumps(saved))
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+        self.assertIn("HttpOnly; SameSite=Strict; Path=/api", self.pin.cookie(token))
+        with self.assertRaises(pinlock.PinError):
+            self.pin.choose("111111", "111111")  # only once
+
+    def test_session_times_out(self):
+        token = self.pin.choose("246810", "246810")
+        self.clock.t += pinlock.SESSION_IDLE + 1
+        self.assertFalse(self.pin.unlocked(self.cookie(token)))
+        token = self.pin.enter("10.0.0.2", "246810")
+        for _ in range(3):  # kept alive by use: 27 minutes
+            self.clock.t += pinlock.SESSION_IDLE - 60
+            self.pin.require(self.cookie(token))
+        self.clock.t += 4 * 60
+        self.assertFalse(self.pin.unlocked(self.cookie(token)))  # 30 minutes at most
+
+    def test_five_tries_then_doubling_wait_per_device(self):
+        self.pin.choose("246810", "246810")
+        for i in range(4):
+            with self.assertRaises(pinlock.PinError) as err:
+                self.pin.enter("10.0.0.9", "000000")
+            self.assertEqual(err.exception.status, 401)
+        waits = []
+        for _ in range(6):
+            with self.assertRaises(pinlock.PinError) as err:
+                self.pin.enter("10.0.0.9", "000000")
+            self.assertEqual(err.exception.status, 429)
+            waits.append(round(err.exception.retry_after))
+            with self.assertRaises(pinlock.PinError) as err:  # even the right PIN waits
+                self.pin.enter("10.0.0.9", "246810")
+            self.assertEqual(err.exception.status, 429)
+            self.clock.t += err.exception.retry_after + 1
+        self.assertEqual(waits, [60, 120, 240, 480, 900, 900])
+        # another device of the owner is not locked out
+        self.assertTrue(self.pin.enter("10.0.0.2", "246810"))
+        # kept on disk: a restart does not help the guesser
+        again = pinlock.Pin(self.path, now=self.clock.now, sleep=self.clock.sleep)
+        self.assertEqual(again.data["devices"]["10.0.0.9"]["failures"], 10)
+        self.assertTrue(again.enter("10.0.0.9", "246810"))
+        self.assertNotIn("10.0.0.9", again.data["devices"])
+
+    def test_box_wide_slowdown(self):
+        self.pin.choose("246810", "246810")
+        for i in range(21):
+            with self.assertRaises(pinlock.PinError):
+                self.pin.enter("10.1.0.%d" % i, "000000")
+        self.assertEqual(self.clock.slept, 0)
+        self.pin.enter("10.0.0.2", "246810")
+        self.assertEqual(self.clock.slept, pinlock.BOX_DELAY)
+        self.clock.t += pinlock.BOX_WINDOW + 1
+        self.pin.enter("10.0.0.2", "246810")
+        self.assertEqual(self.clock.slept, pinlock.BOX_DELAY)
+
+    def test_admin_restart_resets(self):
+        marker = os.path.join(self.tmp, "marker")
+        version = os.path.join(self.tmp, "last-version")
+        self.assertFalse(pinlock.owner_restarted(marker, version, "0.1.0"))  # first install
+        self.assertFalse(pinlock.owner_restarted(marker, version, "0.1.0"))  # reboot, power cut, crash
+        os.remove(marker)  # Admin Restart: a new container
+        self.assertTrue(pinlock.owner_restarted(marker, version, "0.1.0"))
+        os.remove(marker)  # an update: a new container with a new version
+        self.assertFalse(pinlock.owner_restarted(marker, version, "0.1.1"))
+        self.pin.choose("246810", "246810")
+        self.assertTrue(self.pin.reset())
+        self.assertFalse(pinlock.Pin(self.path).is_set())
+        self.assertFalse(self.pin.reset())
+
+
+class PinHttpTest(unittest.TestCase):
+    """The guarded actions and download through the real web layer, with the cookie."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        with open(os.path.join(self.tmp, "index.html"), "w") as handle:
+            handle.write("<html></html>")
+        self.pin = pinlock.Pin(os.path.join(self.tmp, "pin.json"))
+        app = main.App.__new__(main.App)  # only the parts the guard needs
+        app.pin = self.pin
+
+        def secret(_body):
+            return {"reveal": {"words": WORDS}}
+
+        def backup():
+            return "b.backup", b"data"
+
+        web = avadoweb.WebApp(self.tmp, lambda: {}, actions={
+            "show-words": app.guarded(secret), "pin-set": app.action_pin_set, "pin-enter": app.action_pin_enter},
+            downloads={"channel-backup": app.guarded(backup)})
+        self.server = web.serve(port=0, host="127.0.0.1")
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        shutil.rmtree(self.tmp)
+
+    def call(self, method, path, body=None, cookie=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Host": "lightning.my.ava.do", "X-Avado": "1", "Content-Type": "application/json"}
+        if cookie:
+            headers["Cookie"] = cookie
+        conn.request(method, path, json.dumps(body) if body is not None else None, headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return resp, data
+
+    def test_flow(self):
+        resp, data = self.call("POST", "/api/action/show-words", {})
+        self.assertEqual(resp.status, 401)
+        self.assertEqual(json.loads(data)["pin"], "set")
+        self.assertNotIn(b"abandon", data)
+        resp, _ = self.call("GET", "/api/download/channel-backup")
+        self.assertEqual(resp.status, 401)
+        resp, _ = self.call("POST", "/api/action/pin-set", {"pin": "246810", "again": "246810"})
+        self.assertEqual(resp.status, 200)
+        cookie = resp.getheader("Set-Cookie").split(";")[0]
+        resp, data = self.call("POST", "/api/action/show-words", {}, cookie=cookie)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(json.loads(data)["reveal"]["words"], WORDS)
+        resp, data = self.call("GET", "/api/download/channel-backup", cookie=cookie)
+        self.assertEqual((resp.status, data), (200, b"data"))
+        resp, data = self.call("POST", "/api/action/pin-enter", {"pin": "000000"})
+        self.assertEqual((resp.status, json.loads(data)["pin"]), (401, "enter"))
+        resp, _ = self.call("POST", "/api/action/pin-enter", {"pin": "246810"})
+        self.assertEqual(resp.status, 200)
+        self.assertIn("ln_session=", resp.getheader("Set-Cookie"))
 
 
 class ExitTest(unittest.TestCase):

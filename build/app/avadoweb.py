@@ -1,8 +1,10 @@
 """Small web layer shared by the AVADO Bitcoin packages (Bitcoin node, Electrum
 server, Bitcoin explorer, Lightning). Python standard library only. The same
 file is in AVADO-DNP-BitcoinCore, AVADO-DNP-Fulcrum and AVADO-DNP-Mempool;
-this copy (AVADO-DNP-Lightning) adds file downloads (`downloads`) and is
-otherwise identical, so it can replace the others when they next change.
+this copy (AVADO-DNP-Lightning) adds file downloads (`downloads`), errors with
+their own HTTP status (`HttpError`, used by the page PIN) and the caller's
+address, cookies and Set-Cookie for handlers (`request()`), and is otherwise
+identical, so it can replace the others when they next change.
 
 The page is generic: the package builds a "page model" in plain language
 (headline, progress, facts, sections with steps, fields and buttons) and
@@ -192,6 +194,26 @@ class UserError(Exception):
     """An error whose message is plain language and can be shown to the user."""
 
 
+class HttpError(Exception):
+    """An error with its own HTTP status and JSON body (payload())."""
+    status = 400
+
+    def payload(self):
+        return {"error": str(self)}
+
+
+_request = threading.local()
+
+
+def request():
+    """The request being handled in this thread: {"ip", "cookie", "set_cookie"}. A handler may
+    put a Set-Cookie value into "set_cookie"."""
+    info = getattr(_request, "info", None)
+    if info is None:
+        info = _request.info = {"ip": None, "cookie": None, "set_cookie": None}
+    return info
+
+
 class WebApp:
     def __init__(self, public_dir, status, actions=None, internal=None, version="", title="AVADO", downloads=None):
         self.public_dir = os.path.realpath(public_dir)
@@ -249,10 +271,14 @@ class WebApp:
                         if path == "/api/health":
                             return self._send(200, {"ok": True}, extra={"Cache-Control": "no-store"})
                         if path.startswith("/api/download/") and path[len("/api/download/"):] in app.downloads:
+                            _request.info = {"ip": self.client_address[0], "cookie": self.headers.get("Cookie"),
+                                             "set_cookie": None}
                             try:
                                 filename, data = app.downloads[path[len("/api/download/"):]]()
                             except UserError as err:
                                 return self._send(409, str(err), "text/plain; charset=utf-8")
+                            except HttpError as err:
+                                return self._send(err.status, err.payload(), extra={"Cache-Control": "no-store"})
                             safe = "".join(c for c in filename if c.isalnum() or c in "._-") or "download"
                             return self._send(200, data, "application/octet-stream", {
                                 "Cache-Control": "no-store",
@@ -284,11 +310,17 @@ class WebApp:
                         raise ValueError("body must be an object")
                 except (ValueError, UnicodeDecodeError):
                     return self._send(400, {"error": "Bad request"})
+                _request.info = {"ip": self.client_address[0], "cookie": self.headers.get("Cookie"), "set_cookie": None}
                 try:
                     result = handler(body) or {}
-                    return self._send(200, result, extra={"Cache-Control": "no-store"})
+                    extra = {"Cache-Control": "no-store"}
+                    if _request.info.get("set_cookie"):
+                        extra["Set-Cookie"] = _request.info["set_cookie"]
+                    return self._send(200, result, extra=extra)
                 except UserError as err:
                     return self._send(409, {"error": str(err)})
+                except HttpError as err:
+                    return self._send(err.status, err.payload(), extra={"Cache-Control": "no-store"})
                 except Exception:
                     log("action failed:", name, traceback.format_exc())
                     return self._send(500, {"error": "Something went wrong. Please try again."})

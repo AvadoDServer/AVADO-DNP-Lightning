@@ -35,6 +35,7 @@ import time
 
 import avadoweb
 import gate
+import pin as pinlock
 import wamp
 from avadoweb import UserError, log
 from bitcoinrpc import RPC_IN_WARMUP, BitcoinRpc, RpcError, fetch_login
@@ -67,6 +68,10 @@ PHONE_PERMISSIONS = [
     ("macaroon", "read"),
 ]
 PHONE_ROOT_KEY_BASE = 7300
+PIN_FILE = os.path.join(STATE_DIR, "pin.json")
+LAST_VERSION_FILE = os.path.join(STATE_DIR, "last-version")
+# In the container's own files, not the volume: gone in a new container (see pin.owner_restarted).
+CONTAINER_MARKER = os.environ.get("CONTAINER_MARKER", "/tmp/avado-lightning-container")
 
 LINKS = {
     "bitcoin": "http://bitcoincore.my.ava.do/#connect",
@@ -330,6 +335,7 @@ class App:
         os.chmod(STATE_DIR, 0o700)
         self.state = avadoweb.read_json(STATE_FILE, {}) or {}
         self.lnd = LndProcess(config)
+        self.pin = pinlock.Pin(PIN_FILE)
         self.lock = threading.RLock()  # wallet actions one at a time
         self.login = None
         self.login_at = 0
@@ -609,6 +615,25 @@ class App:
             return {"message": "Done. Phones connected so far can no longer use your wallet. Show a new QR code to "
                                "connect again."}
 
+    # -- page PIN
+    def action_pin_set(self, body):
+        token = self.pin.choose(str(body.get("pin") or ""), str(body.get("again") or ""))
+        avadoweb.request()["set_cookie"] = self.pin.cookie(token)
+        log("page PIN chosen")
+        return {"message": "PIN saved."}
+
+    def action_pin_enter(self, body):
+        token = self.pin.enter(avadoweb.request().get("ip") or "?", str(body.get("pin") or ""))
+        avadoweb.request()["set_cookie"] = self.pin.cookie(token)
+        return {"message": "Unlocked."}
+
+    def guarded(self, handler):
+        """Secret things need the page PIN: the words, the phone QR code, the backup download."""
+        def run(*args):
+            self.pin.require(avadoweb.request().get("cookie"))
+            return handler(*args)
+        return run
+
     def download_backup(self):
         path = self.backup_file()
         try:
@@ -639,6 +664,7 @@ class App:
             "backupExists": os.path.exists(self.backup_file()), "backupState": backup_state(self.wallet(), self.backup_chans),
             "phoneShown": bool(self.wallet().get("phoneAt")), "phoneLogin": os.path.exists(self.phone_macaroon()),
             "tailscale": self.tailscale_on(), "lanIp": self.lan_ip, "restored": bool(self.wallet().get("restored")),
+            "pinSet": self.pin.is_set(),
         }
         return info
 
@@ -654,11 +680,15 @@ class App:
     def run(self):
         signal.signal(signal.SIGTERM, self.shutdown)
         signal.signal(signal.SIGINT, self.shutdown)
+        if pinlock.owner_restarted(CONTAINER_MARKER, LAST_VERSION_FILE, VERSION) and self.pin.reset():
+            log("restarted from the AVADO Admin: the page PIN is removed; the page asks for a new one")
         gate.Gate(self.config.rest_port, self.config.lnd_rest_port, ready=self.phone_port_open).start()
+        g = self.guarded
         actions = {
-            "create-wallet": self.action_create_wallet, "show-words": self.action_show_words,
-            "words-done": self.action_words_done, "restore-wallet": self.action_restore_wallet,
-            "show-phone": self.action_show_phone, "forget-phones": self.action_forget_phones,
+            "create-wallet": g(self.action_create_wallet), "show-words": g(self.action_show_words),
+            "words-done": g(self.action_words_done), "restore-wallet": g(self.action_restore_wallet),
+            "show-phone": g(self.action_show_phone), "forget-phones": g(self.action_forget_phones),
+            "pin-set": self.action_pin_set, "pin-enter": self.action_pin_enter,
         }
 
         def invalidate(handler):
@@ -671,7 +701,7 @@ class App:
             return run
 
         avadoweb.WebApp(PUBLIC_DIR, self.status, actions={k: invalidate(v) for k, v in actions.items()},
-                        downloads={"channel-backup": self.download_backup},
+                        downloads={"channel-backup": g(self.download_backup)},
                         version=VERSION, title="Lightning").serve(port=env_int("PORT", 80))
         threading.Thread(target=self.loop, daemon=True).start()
         while True:
@@ -917,6 +947,10 @@ def more_options(info, config, ready):
                          "text": "Disconnect every phone at once. Then show a new QR code for the phones you keep.",
                          "buttons": [{"action": "forget-phones", "label": "Disconnect all phones", "style": "danger",
                                       "confirm": "Every phone connected to this wallet loses access now. Continue?"}]})
+    if info.get("pinSet"):
+        more.append({"title": "Forgot your PIN?",
+                     "text": "Restart Lightning in the AVADO Admin (Restart on its page). The page then asks for a "
+                             "new PIN. Your wallet, words and phones stay as they are."})
     more.append({"title": "How your wallet opens by itself",
                  "text": "The wallet is locked with a long random password that your AVADO made and keeps for this "
                          "app. That is how it opens again by itself after a restart or a power cut. Someone who takes "
