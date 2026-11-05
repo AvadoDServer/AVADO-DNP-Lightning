@@ -345,6 +345,7 @@ class App:
         self.lnd_info = None
         self.balances = None
         self.balances_at = 0
+        self.backup_chans = None  # channels in LND's backup now (None: not known yet)
         self.cache = {"at": 0, "model": None}
         self.cache_lock = threading.Lock()
 
@@ -487,6 +488,7 @@ class App:
             if self.lnd_info and time.time() - self.balances_at > 30:
                 try:
                     self.balances = {"onchain": client.onchain_balance(), "channels": client.channel_balance()}
+                    self.backup_chans = client.backup_channels()
                     self.balances_at = time.time()
                 except LndError:
                     pass
@@ -614,16 +616,16 @@ class App:
                 data = handle.read()
         except OSError:
             raise UserError("There is no channel backup yet. It appears when Lightning has started.")
-        self.wallet().update({"backupSha": hashlib.sha256(data).hexdigest(), "backupAt": int(time.time())})
+        chans = None
+        try:
+            chans = self.client().backup_channels()
+            self.backup_chans = chans
+        except LndError:
+            pass
+        self.wallet().update({"backupSha": hashlib.sha256(data).hexdigest(), "backupAt": int(time.time()),
+                              "backupChans": chans})
         self.save_state()
         return "avado-lightning-channel-backup-%s.backup" % datetime.date.today().isoformat(), data
-
-    def backup_sha(self):
-        try:
-            with open(self.backup_file(), "rb") as handle:
-                return hashlib.sha256(handle.read()).hexdigest()
-        except OSError:
-            return None
 
     # -- page
     def gather(self):
@@ -634,7 +636,7 @@ class App:
             "lndState": self.lnd_state, "lndInfo": self.lnd_info, "balances": self.balances,
             "walletExists": self.wallet_exists(), "passwordFile": os.path.exists(PASSWORD_FILE),
             "seedPending": os.path.exists(self.seed_file()), "wordsDone": bool(self.wallet().get("wordsDoneAt")),
-            "backupSha": self.backup_sha(), "backupDownloadedSha": self.wallet().get("backupSha"),
+            "backupExists": os.path.exists(self.backup_file()), "backupState": backup_state(self.wallet(), self.backup_chans),
             "phoneShown": bool(self.wallet().get("phoneAt")), "phoneLogin": os.path.exists(self.phone_macaroon()),
             "tailscale": self.tailscale_on(), "lanIp": self.lan_ip, "restored": bool(self.wallet().get("restored")),
         }
@@ -722,6 +724,16 @@ def phone_reveal(url, qr, via, lan_ip):
     }
 
 
+def backup_state(wallet, current_chans):
+    """"none" (never downloaded), "changed" (channels opened or closed since) or "ok"."""
+    if not wallet.get("backupAt"):
+        return "none"
+    saved = wallet.get("backupChans")
+    if current_chans is not None and saved is not None and sorted(saved) != sorted(current_chans):
+        return "changed"
+    return "ok"
+
+
 def checklist(info, ready):
     """The four set-up steps, ticked live."""
     lnd_state = info.get("lndState")
@@ -744,18 +756,15 @@ def checklist(info, ready):
         s2["buttons"] = [{"action": "show-words", "label": "Show my 24 words", "style": "primary"}]
     steps.append(s2)
 
-    sha, got = info.get("backupSha"), info.get("backupDownloadedSha")
-    s3 = {"title": "Download the channel backup", "done": bool(sha) and sha == got}
-    if has_wallet and not sha:
+    backup = info.get("backupState") or "none"
+    s3 = {"title": "Download the channel backup", "done": has_wallet and backup == "ok"}
+    if has_wallet and not info.get("backupExists"):
         s3["text"] = "Possible when Lightning has started."
-    elif has_wallet and sha:
-        if got and sha != got:
-            s3["text"] = "Your channels changed: download it again."
-        elif not got:
-            s3["text"] = "Download it again after you open or close a channel."
-        if sha != got:
-            s3["links"] = [{"label": "Download", "href": "api/download/channel-backup", "download": True,
-                            "style": "primary" if words_done else None}]
+    elif has_wallet and backup != "ok":
+        s3["text"] = ("Your channels changed: download it again." if backup == "changed"
+                      else "Download it again after you open or close a channel.")
+        s3["links"] = [{"label": "Download", "href": "api/download/channel-backup", "download": True,
+                        "style": "primary" if words_done else None}]
     steps.append(s3)
 
     s4 = {"title": "Connect Zeus on your phone", "done": bool(info.get("phoneShown")) and has_wallet}
@@ -886,6 +895,10 @@ def more_options(info, config, ready):
                                           "placeholder": "word1 word2 word3 ..."},
                                          {"name": "backup", "type": "file", "label": "Channel backup (optional)"}]}})
     if has_wallet and ready:
+        if info.get("phoneShown"):
+            # Step 4 is ticked and folded: the QR code for one more phone lives here.
+            more.append({"title": "Connect another phone",
+                         "buttons": [{"action": "show-phone", "label": "Show the QR code"}]})
         other = "home" if info.get("tailscale") else "tailscale"
         if other == "home":
             more.append({"title": "Zeus on your home Wi-Fi only",

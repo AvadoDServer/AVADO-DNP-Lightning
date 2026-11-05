@@ -53,7 +53,7 @@ def info(**kw):
             "balances": {"onchain": {"confirmed_balance": "150000"},
                          "channels": {"local_balance": {"sat": "50000"}}},
             "walletExists": True, "passwordFile": True, "seedPending": False, "wordsDone": True,
-            "backupSha": "aa", "backupDownloadedSha": "aa", "phoneShown": True, "phoneLogin": True,
+            "backupExists": True, "backupState": "ok", "phoneShown": True, "phoneLogin": True,
             "tailscale": False, "lanIp": "192.168.1.20", "restored": False}
     base.update(kw)
     return base
@@ -186,7 +186,7 @@ class ModelTest(unittest.TestCase):
 
     def test_new_wallet(self):
         m = main.build_model(info(lndState="NON_EXISTING", walletExists=False, lndInfo=None, balances=None,
-                                  wordsDone=False, backupSha=None, backupDownloadedSha=None, phoneShown=False,
+                                  wordsDone=False, backupExists=False, backupState="none", phoneShown=False,
                                   phoneLogin=False), config())
         self.assertEqual(m["headline"], "Create your Lightning wallet")
         self.assertIn("Keep only small amounts here.", m["text"][0])
@@ -201,7 +201,7 @@ class ModelTest(unittest.TestCase):
         self.assertLessEqual(main_words(m), 120)
 
     def test_words_waiting(self):
-        m = main.build_model(info(seedPending=True, wordsDone=False, backupDownloadedSha=None,
+        m = main.build_model(info(seedPending=True, wordsDone=False, backupState="none",
                                   phoneShown=False), config())
         steps = next(s for s in m["sections"] if s["id"] == "setup")["checklist"]
         self.assertEqual([s["done"] for s in steps], [True, False, False, False])
@@ -211,7 +211,7 @@ class ModelTest(unittest.TestCase):
         self.assertLessEqual(main_words(m), 120)
 
     def test_backup_changed_unticks(self):
-        m = main.build_model(info(backupSha="bb", backupDownloadedSha="aa"), config())
+        m = main.build_model(info(backupState="changed"), config())
         steps = next(s for s in m["sections"] if s["id"] == "setup")["checklist"]
         self.assertFalse(steps[2]["done"])
         self.assertIn("changed", steps[2]["text"])
@@ -227,6 +227,7 @@ class ModelTest(unittest.TestCase):
         more = next(s for s in m["sections"] if s["id"] == "more")
         titles = [x["title"] for x in more["more"]]
         self.assertIn("Lost a phone?", titles)
+        self.assertIn("Connect another phone", titles)
         self.assertNotIn("Restore a wallet", titles)
         self.assertNotIn("pw-secret", json.dumps(m))
 
@@ -252,6 +253,17 @@ class ModelTest(unittest.TestCase):
         m = main.build_model(info(running=False, lastExit={"code": 1, "at": time.time(), "why": None,
                                                            "pause": 20}), config())
         self.assertEqual(m["headline"], "Lightning is starting again")
+
+
+class BackupStateTest(unittest.TestCase):
+    def test_states(self):
+        self.assertEqual(main.backup_state({}, []), "none")
+        self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": []}, []), "ok")
+        # LND re-encrypts the file at every start: same channels stay ticked.
+        self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": ["a:0"]}, ["a:0"]), "ok")
+        self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": []}, ["a:0"]), "changed")
+        self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": ["a:0"]}, []), "changed")
+        self.assertEqual(main.backup_state({"backupAt": 1, "backupChans": ["a:0"]}, None), "ok")
 
 
 class ExitTest(unittest.TestCase):

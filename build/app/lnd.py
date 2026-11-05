@@ -109,6 +109,14 @@ class Lnd:
     def channel_balance(self):
         return self.call("GET", "/v1/balance/channels", timeout=8)
 
+    def backup_channels(self):
+        """The channels the channel backup covers, as sorted "funding:index" strings. LND
+        encrypts the file afresh at every start, so its bytes change without new channels."""
+        data = self.call("GET", "/v1/channels/backup", timeout=10)
+        points = ((data.get("multi_chan_backup") or {}).get("chan_points")) or []
+        return sorted("%s:%s" % (p.get("funding_txid_bytes") or p.get("funding_txid_str"), p.get("output_index", 0))
+                      for p in points)
+
     def bake_macaroon(self, permissions, root_key_id):
         body = {"permissions": [{"entity": e, "action": a} for e, a in permissions],
                 "root_key_id": str(int(root_key_id))}
