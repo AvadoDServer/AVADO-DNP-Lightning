@@ -1,0 +1,23 @@
+{
+  "title": "Lightning (LND)",
+  "components": [
+    {
+      "name": "LND",
+      "github": "lightningnetwork/lnd",
+      "tag": "^v(\\d+\\.\\d+\\.\\d+)-beta$",
+      "caution": "The SHA-256 comes from the release's manifest-v{version}-beta.txt; this check does not verify that file's gpg signatures (the Dockerfile comment says they were checked for the pinned version). The build checks the download against the SHA-256.",
+      "checksums": [
+        {
+          "var": "sha",
+          "sums": "https://github.com/lightningnetwork/lnd/releases/download/v{version}-beta/manifest-v{version}-beta.txt",
+          "file": "lnd-linux-amd64-v{version}-beta.tar.gz"
+        }
+      ],
+      "pins": [
+        { "file": "build/Dockerfile", "text": "ARG LND_VERSION=v{version}-beta\nARG LND_SHA256={sha}\n" },
+        { "file": "build/Dockerfile", "text": "manifest-v{version}-beta.txt", "optional": true },
+        { "file": "dappnode_package.json", "text": "\"upstream\": \"v{version}-beta\"" }
+      ]
+    }
+  ]
+}
