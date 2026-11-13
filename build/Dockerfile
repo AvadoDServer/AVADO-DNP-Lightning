@@ -12,13 +12,13 @@ ARG DEBIAN_IMAGE=debian:bookworm-20261027-slim@sha256:99c0b25c46d0214d5a2091092e
 ########## LND, verified
 FROM --platform=linux/amd64 ${DEBIAN_IMAGE} AS lnd
 # The official release from github.com/lightningnetwork/lnd. The SHA-256 below is
-# the line for this file in the release's manifest-v0.21.6-beta.txt, whose
+# the line for this file in the release's manifest-v0.21.8-beta.txt, whose
 # signatures were checked with gpg against the keys in the lnd repository
 # (scripts/keys at the release tag): 6 good signatures, among them roasbeef,
 # ViktorT-11 and ziggie1984. A different download fails the build. To update:
 # change both lines together.
-ARG LND_VERSION=v0.21.6-beta
-ARG LND_SHA256=47db47290df2d183393259a7b313ddcfc7376e9cd941bd691858250246fc763e
+ARG LND_VERSION=v0.21.8-beta
+ARG LND_SHA256=4910a14801e10164ca2ea67f5935e2486874331d56bbd0638a68c6158a8e82c9
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
